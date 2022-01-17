@@ -306,6 +306,7 @@ public class CocoaMQTT: NSObject, CocoaMQTTClient, CocoaMQTTDeliverProtocol {
         
         delegate?.mqtt(self, didPublishMessage: message, id: msgid)
         didPublishMessage(self, message, msgid)
+        sendingMessages.removeValue(forKey: msgid)
     }
 
     fileprivate func send(_ frame: CocoaMQTTFrame, tag: Int = 0) {
