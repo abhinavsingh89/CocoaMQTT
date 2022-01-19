@@ -125,8 +125,8 @@ protocol CocoaMQTTClient {
     func subscribe(_ topics: [(String, CocoaMQTTQOS)]) -> UInt16
     
     func unsubscribe(_ topic: String) -> UInt16
-    func publish(_ topic: String, withString string: String, qos: CocoaMQTTQOS, retained: Bool, dup: Bool) -> UInt16
-    func publish(_ message: CocoaMQTTMessage) -> UInt16
+    func publish(_ topic: String, withString string: String, qos: CocoaMQTTQOS, retained: Bool, dup: Bool) -> Int
+    func publish(_ message: CocoaMQTTMessage) -> Int
     
 }
 
@@ -398,30 +398,35 @@ public class CocoaMQTT: NSObject, CocoaMQTTClient, CocoaMQTTDeliverProtocol {
     }
 
     @discardableResult
-    public func publish(_ topic: String, withString string: String, qos: CocoaMQTTQOS = .qos1, retained: Bool = false, dup: Bool = false) -> UInt16 {
+    public func publish(_ topic: String, withString string: String, qos: CocoaMQTTQOS = .qos1, retained: Bool = false, dup: Bool = false) -> Int {
         // TODO: The duplicated flag must hidden for caller
         let message = CocoaMQTTMessage(topic: topic, string: string, qos: qos, retained: retained, dup: dup)
         return publish(message)
     }
 
     @discardableResult
-    public func publish(_ message: CocoaMQTTMessage) -> UInt16 {
+    public func publish(_ message: CocoaMQTTMessage) -> Int {
         let msgid: UInt16 = nextMessageID()
         // XXX: qos0 should not take msgid
         var frame = CocoaMQTTFramePublish(msgid: msgid, topic: message.topic, payload: message.payload)
         frame.qos = message.qos.rawValue
         frame.retained = message.retained
         frame.dup = message.dup
-        
-        // Push frame to deliver message queue
-        _ = deliver.add(frame)
-        
+                
         // XXX: For process safety
         dispatchQueue.async {
             self.sendingMessages[msgid] = message
         }
         
-        return msgid
+        // Push frame to deliver message queue
+        guard deliver.add(frame) else {
+            dispatchQueue.async {
+                self.sendingMessages.removeValue(forKey: msgid)
+            }
+            return -1
+        }
+        
+        return Int(msgid)
     }
 
     @discardableResult
