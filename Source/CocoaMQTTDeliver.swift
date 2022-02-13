@@ -13,7 +13,7 @@ protocol CocoaMQTTDeliverProtocol: class {
     
     var dispatchQueue: DispatchQueue { get set }
     
-    func deliver(_ deliver: CocoaMQTTDeliver, wantToSend frame: CocoaMQTTFramePublish)
+    func deliver(_ deliver: CocoaMQTTDeliver, wantToSend frame: CocoaMQTTFramePublish) -> Bool
 }
 
 private struct InflightFrame {
@@ -37,6 +37,7 @@ class CocoaMQTTDeliver: NSObject {
     
     /// The dispatch queue is used by delivering frames in serially
     private var deliverQueue = DispatchQueue.init(label: "deliver.cocoamqtt.emqx", qos: .default)
+    private var inflightQueue = DispatchQueue.init(label: "deliver.cocoamqtt.emqx.inflight", qos: .default)
     
     weak var delegate: CocoaMQTTDeliverProtocol?
     
@@ -62,6 +63,10 @@ class CocoaMQTTDeliver: NSObject {
     func add(_ frame: CocoaMQTTFramePublish) -> Bool {
         guard !isQueueFull else {
             printError("Buffer is full, message(\(String(describing: frame.msgid))) was abandoned.")
+            deliverQueue.async { [weak self] in
+                guard let wself = self else { return }
+                wself.tryTransport()
+            }
             return false
         }
         
@@ -92,6 +97,9 @@ class CocoaMQTTDeliver: NSObject {
         deliverQueue.async { [weak self] in
             guard let wself = self else { return }
             _ = wself.mqueue.removeAll()
+        }
+        self.inflightQueue.async { [weak self] in
+            guard let wself = self else { return }
             _ = wself.inflight.removeAll()
         }
     }
@@ -133,7 +141,10 @@ extension CocoaMQTTDeliver {
         } else {
             
             sendfun(frame)
-            inflight.append(InflightFrame(frame: frame))
+            inflightQueue.async { [weak self] in
+                guard let wself = self else { return }
+                wself.inflight.append(InflightFrame(frame: frame))
+            }
             
             // Start a retry timer for resending it if it not receive PUBACK or PUBREC
             if awaitingTimer == nil {
@@ -159,33 +170,42 @@ extension CocoaMQTTDeliver {
                 return
             }
             delegate.dispatchQueue.async {
-                delegate.deliver(self, wantToSend: f)
+                guard delegate.deliver(self, wantToSend: f) else {
+                    if let messageId = f.msgid {
+                        CocoaMQTTLogger.logger.error("Message dropped because already delivered for topic: \(f.topic ?? "") : \(messageId)")
+                        self.removeFrameFromInflight(withMsgid: messageId)
+                    }
+                    return
+                }
             }
         }
         
-        let nowTimestamp = Date(timeIntervalSinceNow: 0).timeIntervalSince1970
-        for (idx, frame) in inflight.enumerated() {
-            if (nowTimestamp - frame.timestamp) >= (retryTimeInterval/1000.0) {
-                var duplicatedFrame = frame
-                duplicatedFrame.frame.dup = true
-                duplicatedFrame.timestamp = nowTimestamp
-                sendfun(duplicatedFrame.frame)
-                inflight[idx] = duplicatedFrame
-                printInfo("Re-delivery frame \(duplicatedFrame.frame)")
+        inflightQueue.async { [weak self] in
+            guard let wself = self else { return }
+            let nowTimestamp = Date(timeIntervalSinceNow: 0).timeIntervalSince1970
+            for (idx, frame) in wself.inflight.enumerated() {
+                if (nowTimestamp - frame.timestamp) >= (wself.retryTimeInterval/1000.0) {
+                    var duplicatedFrame = frame
+                    duplicatedFrame.frame.dup = true
+                    duplicatedFrame.timestamp = nowTimestamp
+                    sendfun(duplicatedFrame.frame)
+                    wself.inflight[idx] = duplicatedFrame
+                    printInfo("Re-delivery frame \(duplicatedFrame.frame)")
+                }
             }
         }
+        
     }
     
-    @discardableResult
-    private func removeFrameFromInflight(withMsgid msgid: UInt16) -> Bool {
-        var success = false
-        for (index, frame) in inflight.enumerated() {
-            if frame.frame.msgid == msgid {
-                success = true
-                inflight.remove(at: index)
-                break
+    private func removeFrameFromInflight(withMsgid msgid: UInt16) {
+        inflightQueue.async { [weak self] in
+            guard let wself = self else { return }
+            for (index, frame) in wself.inflight.enumerated() {
+                if frame.frame.msgid == msgid {
+                    wself.inflight.remove(at: index)
+                    break
+                }
             }
         }
-        return success
     }
 }

@@ -296,17 +296,21 @@ public class CocoaMQTT: NSObject, CocoaMQTTClient, CocoaMQTTDeliverProtocol {
     }
     
     // MARK: CocoaMQTTDeliverProtocol
-    func deliver(_ deliver: CocoaMQTTDeliver, wantToSend frame: CocoaMQTTFramePublish) {
-        let msgid = frame.msgid!
-        guard let message = sendingMessages[msgid] else {
-            return
+    func deliver(_ deliver: CocoaMQTTDeliver, wantToSend frame: CocoaMQTTFramePublish) -> Bool {
+        
+        guard let msgid = frame.msgid,
+            let message = sendingMessages[msgid] else {
+            return false
         }
         
         send(frame, tag: Int(msgid))
         
         delegate?.mqtt(self, didPublishMessage: message, id: msgid)
         didPublishMessage(self, message, msgid)
-        sendingMessages.removeValue(forKey: msgid)
+        if frame.qos == 0 {
+            sendingMessages.removeValue(forKey: msgid)
+        }
+        return true
     }
 
     fileprivate func send(_ frame: CocoaMQTTFrame, tag: Int = 0) {
@@ -602,6 +606,7 @@ extension CocoaMQTT: CocoaMQTTReaderDelegate {
         printDebug("PUBACK Received: \(msgid)")
         
         deliver.sendSuccess(withMsgid: msgid)
+        sendingMessages.removeValue(forKey: msgid)
         delegate?.mqtt(self, didPublishAck: msgid)
         didPublishAck(self, msgid)
     }
@@ -622,6 +627,7 @@ extension CocoaMQTT: CocoaMQTTReaderDelegate {
         printDebug("PUBCOMP Received: \(msgid)")
 
         deliver.sendSuccess(withMsgid: msgid)
+        sendingMessages.removeValue(forKey: msgid)
         delegate?.mqtt?(self, didPublishComplete: msgid)
         didCompletePublish(self, msgid)
     }
